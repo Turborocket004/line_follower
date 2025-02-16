@@ -38,10 +38,31 @@ color_ranges = {
 
 ตรวจจับว่าพื้นที่เส้นมีสีอะไร]
 
-
-
 [
+ if deviations:
+            deviation_value = deviations[-1][2]
+            if deviation_value < -20:
+                direction = "ADJUST RIGHT"
+            elif deviation_value > 20:
+                direction = "ADJUST LEFT"
+            else:
+                direction = "FORWARD"
+
+        if top_dot:
+            deviation = top_dot[0] - frame_center
+            if deviation < -100:  
+                direction = "TURN RIGHT"
+            elif deviation > 100:  
+                direction = "TURN LEFT"
+            elif deviation < -20:  
+                direction = "ADJUST RIGHT"
+            elif deviation > 20:  
+                direction = "ADJUST LEFT"
+            else:
+                direction = "STRAIGHT"
+
 return mask, deviations, middle_points, contour_path, direction, deviation_value, line_color
+
 mask	ภาพขาวดำ (Binary Mask)	ใช้แสดงเส้นดำที่ตรวจจับได้
 deviations	List ของค่าการเบี่ยงเบน	ใช้คำนวณว่าต้องปรับซ้าย/ขวา
 middle_points	List ของจุดกึ่งกลางของเส้น	ใช้ระบุโครงสร้างของเส้น
