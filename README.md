@@ -39,7 +39,7 @@ color_ranges = {
 ตรวจจับว่าพื้นที่เส้นมีสีอะไร]
 -------------------------------------------------------------------------------------------------------------------------------------------------
 [
- if deviations:
+if deviations:
             deviation_value = deviations[-1][2]
             if deviation_value < -20:
                 direction = "ADJUST RIGHT"
