@@ -1,65 +1,110 @@
 import cv2
 import numpy as np
 
-def detect_black_line(frame, threshold=60):
+def detect_black_line_and_color(frame, threshold=60):
     """
-    ตรวจจับเส้นสีดำ คำนวณค่าการเบี่ยงเบนจากจุดกึ่งกลาง และวาดขอบเขตที่สามารถติดตามรูปร่างแบบ L หรือ S ได้
+    ฟังก์ชันสำหรับตรวจจับเส้นสีดำ, คำนวณทิศทาง และตรวจจับสีของเส้นที่เป็น (ดำ, แดง, เขียว, น้ำเงิน)
     """
-    # แปลงภาพเป็นระดับสีเทา
+    # แปลงภาพเป็นระดับสีเทา (Grayscale)
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-    # ใช้ thresholding เพื่อแยกส่วนที่เป็นสีดำ (กลับค่าเป็นสีขาว)
+    # ใช้ Threshold เพื่อแยกเส้นสีดำออกจากพื้นหลัง
     _, mask = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY_INV)
 
-    # ค้นหาขอบเขตของพื้นที่สีดำทั้งหมด
+    # ค้นหา Contours ของเส้นดำ
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    deviations = []  # เก็บค่าการเบี่ยงเบนของ centroid แต่ละส่วน
-    middle_points = []  # เก็บจุดกลางของแต่ละส่วน (อ้างอิงตำแหน่งกลางภาพ)
-    contour_path = None  # เก็บเส้นขอบที่ตรวจพบ
+    deviations = []  # เก็บค่าการเบี่ยงเบนของเส้น
+    middle_points = []  # จุดกึ่งกลางแต่ละส่วนของเส้น
+    contour_path = None  # เส้นขอบของเส้นดำ
+    direction = "STOP"  # ค่าทิศทางเริ่มต้น
+    deviation_value = 0  # ค่าการเบี่ยงเบน
+    line_color = "NO COLOR"  # สีของเส้น
 
     if contours:
-        # เลือกขอบเขตที่ใหญ่ที่สุด (คิดว่าเป็นเส้นหลัก)
+        # เลือก Contour ที่ใหญ่ที่สุด สมมติว่าเป็นเส้นหลัก
         largest_contour = max(contours, key=cv2.contourArea)
 
-        # ใช้การประมาณรูปทรงเพื่อลดจำนวนจุด ทำให้สามารถติดตามรูปร่างแบบ L หรือ S ได้ดีขึ้น
-        epsilon = 0.005 * cv2.arcLength(largest_contour, True)  # ค่าลดลงเพื่อความแม่นยำ
+        # ทำให้เส้นเรียบขึ้น
+        epsilon = 0.005 * cv2.arcLength(largest_contour, True)
         contour_path = cv2.approxPolyDP(largest_contour, epsilon, True)
 
-        # หาขอบเขตของพื้นที่สีดำและแบ่งออกเป็น 4 ส่วน
-        x, y, w, h = cv2.boundingRect(largest_contour)
-        section_height = h // 4  # แบ่งออกเป็น 4 ส่วนตามแนวตั้ง
+        # สร้าง Mask ของเส้นดำ
+        line_mask = np.zeros_like(mask)
+        cv2.drawContours(line_mask, [largest_contour], -1, 255, thickness=cv2.FILLED)
 
-        frame_center = frame.shape[1] // 2  # ตำแหน่งกึ่งกลางของภาพตามแนวแกน X
+        # แปลงภาพเป็น HSV เพื่อใช้ตรวจจับสี
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
-        # วาดจุดอ้างอิงตรงกลาง (4 จุดที่คงที่)
-        for i in range(4):
-            section_y = int(y + (i + 0.5) * section_height)  # คำนวณตำแหน่งแนวแกน Y ของแต่ละส่วน
-            middle_points.append((frame_center, section_y))  # บันทึกจุดกึ่งกลางแนวตั้ง
+        # กำหนดช่วงค่าสีสำหรับตรวจจับ
+        color_ranges = {
+            "BLACK": [(0, 0, 0), (180, 255, 50)],  # สีดำ
+            "RED": [(0, 120, 70), (10, 255, 255)],  # สีแดง
+            "GREEN": [(35, 40, 40), (85, 255, 255)],  # สีเขียว (ปรับค่าจากเดิม)
+            "BLUE": [(90, 50, 70), (128, 255, 255)]  # สีน้ำเงิน
+        }
 
-            # สร้าง mask เฉพาะส่วนที่เราต้องการตรวจจับ centroid
+        # ตรวจจับสีของเส้น
+        for color, (lower, upper) in color_ranges.items():
+            color_mask = cv2.inRange(hsv, np.array(lower), np.array(upper))  # สร้าง Mask สำหรับสี
+            color_mask = cv2.bitwise_and(color_mask, color_mask, mask=line_mask)  # ตรวจสอบเฉพาะพื้นที่เส้น
+
+            if cv2.countNonZero(color_mask) > 500:  # ถ้ามีสีมากพอ
+                line_color = f"{color} DETECTED"
+                break  # พบสีแล้ว หยุดทำงาน
+
+        # คำนวณทิศทางของหุ่นยนต์จากเส้นดำ
+        x, y, w, h = cv2.boundingRect(largest_contour)  # หา Bounding Box ของเส้นดำ
+        section_height = h // 4  # แบ่งเส้นออกเป็น 4 ส่วน
+        frame_center = frame.shape[1] // 2  # กึ่งกลางของเฟรม
+
+        top_dot = None
+        for i in range(4):  # วนลูปตรวจจับจุดกลางของแต่ละส่วน
+            section_y = int(y + (i + 0.5) * section_height)  # คำนวณตำแหน่งแกน Y
+            middle_points.append((frame_center, section_y))
+
+            # สร้าง Mask เฉพาะบริเวณที่ต้องการ
             section_mask = np.zeros_like(mask)
             section_mask[max(0, section_y - section_height // 2):section_y + section_height // 2, :] = mask[
                 max(0, section_y - section_height // 2):section_y + section_height // 2, :]
 
-            # ค้นหา contours ของเส้นสีดำในแต่ละส่วน
             section_contours, _ = cv2.findContours(section_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
             if section_contours:
-                # เลือก contour ที่ใหญ่ที่สุดในส่วนนี้
                 section_largest = max(section_contours, key=cv2.contourArea)
-
-                # คำนวณจุดศูนย์กลางของ contour
                 M = cv2.moments(section_largest)
                 if M["m00"] != 0:
-                    cx = int(M["m10"] / M["m00"])  # คำนวณตำแหน่ง X ของจุดศูนย์กลาง
-                    cy = int(M["m01"] / M["m00"])  # คำนวณตำแหน่ง Y ของจุดศูนย์กลาง
-
-                    # คำนวณค่าการเบี่ยงเบนจากจุดกลางภาพ
+                    cx = int(M["m10"] / M["m00"])
+                    cy = int(M["m01"] / M["m00"])
                     deviation = cx - frame_center
-                    deviations.append((cx, cy, deviation))  # เก็บค่าการเบี่ยงเบน
+                    deviations.append((cx, cy, deviation))
 
-    return mask, deviations, middle_points, contour_path
+                    if i == 0:  # จุดบนสุดของเส้น
+                        top_dot = (cx, cy)
+
+        if deviations:
+            deviation_value = deviations[-1][2]
+            if deviation_value < -20:
+                direction = "ADJUST RIGHT"
+            elif deviation_value > 20:
+                direction = "ADJUST LEFT"
+            else:
+                direction = "FORWARD"
+
+        if top_dot:
+            deviation = top_dot[0] - frame_center
+            if deviation < -100:  
+                direction = "TURN RIGHT"
+            elif deviation > 100:  
+                direction = "TURN LEFT"
+            elif deviation < -20:  
+                direction = "ADJUST RIGHT"
+            elif deviation > 20:  
+                direction = "ADJUST LEFT"
+            else:
+                direction = "STRAIGHT"
+
+    return mask, deviations, middle_points, contour_path, direction, deviation_value, line_color
 
 # เปิดกล้อง
 cap = cv2.VideoCapture(0)
@@ -69,24 +114,30 @@ while cap.isOpened():
     if not ret:
         break
 
-    # ตรวจจับเส้นสีดำและรับค่าการเบี่ยงเบน + จุดกลาง
-    mask, deviations, middle_points, contour_path = detect_black_line(frame)
+    # ตรวจจับเส้นดำ + คำนวณทิศทาง + ตรวจจับสีของเส้น
+    mask, deviations, middle_points, contour_path, direction, deviation_value, line_color = detect_black_line_and_color(frame)
 
-    # วาดจุดอ้างอิงกลางภาพ (4 จุดสีแดง)
+    # วาดจุดกลางของแต่ละส่วนบนเฟรม
     for (mx, my) in middle_points:
-        cv2.circle(frame, (mx, my), 5, (0, 0, 255), -1)  # จุดสีแดง
+        cv2.circle(frame, (mx, my), 5, (0, 0, 255), -1)
 
-    # วาดจุดศูนย์กลางที่ตรวจพบในแต่ละส่วน
-    for i, (cx, cy, deviation) in enumerate(deviations):
-        cv2.circle(frame, (cx, cy), 5, (255, 0, 0), -1)  # จุดสีน้ำเงินแสดงตำแหน่ง centroid
-        cv2.putText(frame, f"Dev {i+1}: {deviation}", (50, 50 + i * 30), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)  # แสดงค่าการเบี่ยงเบนบนภาพ
+    for (cx, cy, deviation) in deviations:
+        cv2.circle(frame, (cx, cy), 5, (255, 0, 0), -1)
+        cv2.putText(frame, f"Dev: {deviation}", (cx, cy-10), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
 
-    # วาดเส้นขอบสีเขียวที่ติดตามเส้นสีดำ (L หรือ S ได้)
     if contour_path is not None:
-        cv2.drawContours(frame, [contour_path], -1, (0, 255, 0), 2)  # ขอบเขียวตามเส้นดำ
+        cv2.drawContours(frame, [contour_path], -1, (0, 255, 0), 2)
 
-    # แสดงผลลัพธ์
+    # แสดงข้อมูลทิศทาง และสีของเส้นบนเฟรม
+    cv2.putText(frame, f"Direction: {direction}", (50, 50), 
+                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+    cv2.putText(frame, f"Deviation: {deviation_value}", (50, 90), 
+                cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
+    cv2.putText(frame, f"Line Color: {line_color}", (50, 130), 
+                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
+    # แสดงผล
     cv2.imshow("Original Frame", frame)
     cv2.imshow("Binary Mask", mask)
 
@@ -94,6 +145,5 @@ while cap.isOpened():
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
-# ปิดการเชื่อมต่อกล้องและหน้าต่างทั้งหมด
 cap.release()
 cv2.destroyAllWindows()
