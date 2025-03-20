@@ -1,0 +1,101 @@
+import cv2
+import numpy as np
+import socket
+import struct
+
+# การตั้งค่า Socket
+server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server_socket.bind(("0.0.0.0", 8080))  # ฟังการเชื่อมต่อจากทุกๆ อินเทอร์เฟซเครือข่าย
+server_socket.listen(5)
+
+print("Waiting for connection...")
+
+# ฟังก์ชันสำหรับตรวจจับสัญลักษณ์ STOP (สัญญาณหยุด)
+def detect_stop_symbol(frame):
+    """Detects a stop sign based on two horizontal lines."""
+    # แปลงภาพเป็นโทนสีเทา
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+    # ใช้ Gaussian Blur เพื่อลดสัญญาณรบกวน (Noise)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    # ใช้ Canny Edge Detection เพื่อหาขอบของวัตถุในภาพ
+    edges = cv2.Canny(blurred, 50, 150)
+
+    # ใช้ Hough Transform เพื่อตรวจจับเส้น
+    lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=50, minLineLength=30, maxLineGap=15)
+
+    if lines is None:
+        return "CONTINUE"  # ถ้าไม่มีเส้นเลยก็ให้เดินหน้าต่อ
+
+    horizontal_lines = []
+
+    for line in lines:
+        x1, y1, x2, y2 = line[0]
+        if abs(y2 - y1) / max(abs(x2 - x1), 1) < 0.1:  # ตรวจสอบว่าเส้นนั้นใกล้จะเป็นแนวนอน
+            horizontal_lines.append((x1, y1, x2, y2))
+            cv2.line(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)  # วาดเส้นที่ตรวจพบลงในภาพ
+
+    if len(horizontal_lines) >= 2:
+        horizontal_lines.sort(key=lambda line: line[1])  # เรียงเส้นตามพิกัด y
+        for i in range(len(horizontal_lines) - 1):
+            y_diff = abs(horizontal_lines[i][1] - horizontal_lines[i + 1][1])
+            if 15 < y_diff < 50:  # หากความต่างของ y อยู่ในช่วงที่กำหนด (สามารถปรับค่าได้)
+                cv2.putText(frame, "STOP", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                return "STOP"  # ถ้าพบว่าเป็นสัญญาณ STOP ก็ให้ส่งคำสั่ง "STOP"
+
+    return "CONTINUE"  # ถ้าไม่พบสัญลักษณ์ STOP ก็ให้เดินหน้าต่อ
+
+# ฟังก์ชันเพื่อรับข้อมูลวิดีโอจาก Client
+def receive_video(conn):
+    data = b""  # ตัวแปรสำหรับเก็บข้อมูลที่รับมาจาก Client
+    payload_size = struct.calcsize("Q")  # ขนาดข้อมูลที่ต้องการรับ
+
+    try:
+        while True:
+            while len(data) < payload_size:
+                packet = conn.recv(4096)  # รับข้อมูลจาก Client
+                if not packet:
+                    print("Client disconnected.")
+                    return
+                data += packet
+
+            packed_msg_size = data[:payload_size]  # ขนาดของข้อมูล
+            data = data[payload_size:]  # เอาขนาดข้อมูลออกจากตัวแปร data
+            msg_size = struct.unpack("Q", packed_msg_size)[0]  # แปลงขนาดข้อมูล
+
+            while len(data) < msg_size:
+                data += conn.recv(4096)  # รับข้อมูลจนกว่าจะครบ
+
+            frame_data = data[:msg_size]  # ข้อมูลของเฟรม
+            data = data[msg_size:]  # เอาข้อมูลเฟรมออกจากตัวแปร data
+
+            # แปลงข้อมูล JPEG ให้เป็นภาพ
+            frame = cv2.imdecode(np.frombuffer(frame_data, dtype=np.uint8), cv2.IMREAD_COLOR)
+
+            # ตรวจจับสัญลักษณ์ STOP
+            status = detect_stop_symbol(frame)
+
+            # ส่งคำสั่ง "STOP" หรือ "CONTINUE" กลับไปยัง Client
+            conn.sendall(status.encode())
+
+            # แสดงผลภาพที่ตรวจพบสัญลักษณ์ STOP
+            cv2.imshow("Real-Time Video", frame)
+
+            if cv2.waitKey(1) & 0xFF == ord("q"):  # ถ้ากด 'q' ให้หยุดการสตรีม
+                print("Stopping stream...")
+                return
+
+    except (ConnectionResetError, BrokenPipeError):  # ถ้าเชื่อมต่อหลุด
+        print("Connection lost. Waiting for new connection...")
+        return
+
+# การเชื่อมต่อจาก Client
+while True:
+    conn, addr = server_socket.accept()  # รอการเชื่อมต่อจาก Client
+    print(f"Connected to {addr}")
+    receive_video(conn)  # เริ่มรับข้อมูลวิดีโอจาก Client
+    conn.close()  # ปิดการเชื่อมต่อ
+
+server_socket.close()  # ปิด Socket Server
+cv2.destroyAllWindows()  # ปิดหน้าต่างแสดงผลของ OpenCV
