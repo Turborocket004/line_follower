@@ -1,0 +1,143 @@
+import cv2
+import numpy as np
+import socket
+import struct
+
+# การตั้งค่า Socket
+server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server_socket.bind(("0.0.0.0", 8080))  # เปิดฟังการเชื่อมต่อจากทุกๆ อินเทอร์เฟซเครือข่าย
+server_socket.listen(5)  # รอการเชื่อมต่อสูงสุด 5 ครั้ง
+
+print("Waiting for connection...")
+
+# ฟังก์ชันสำหรับการปรับเกณฑ์ HSV โดยพิจารณาความสว่าง
+def adaptive_hsv_threshold(hsv, lower, upper):
+    """
+    Adaptive thresholding based on brightness
+    """
+    v_mean = np.mean(hsv[:, :, 2])  # หาค่าเฉลี่ยของความสว่าง (ช่อง V ใน HSV)
+    factor = 255 / max(v_mean, 1)  # ทำการปรับค่าสเกลตามความสว่าง
+    lower = np.array(lower) * factor  # ปรับค่าเกณฑ์ล่าง
+    upper = np.array(upper) * factor  # ปรับค่าเกณฑ์บน
+    lower = np.clip(lower, 0, 255).astype(np.uint8)  # จำกัดค่าต่ำสุดไม่ให้ต่ำกว่า 0 และสูงสุดไม่เกิน 255
+    upper = np.clip(upper, 0, 255).astype(np.uint8)  # ทำแบบเดียวกันกับเกณฑ์บน
+    return lower, upper  # คืนค่าเกณฑ์ที่ปรับแล้ว
+
+# ฟังก์ชันตรวจจับเส้นดำและสี (ดำ, แดง, เขียว, น้ำเงิน) รวมถึงการคำนวณทิศทาง
+def detect_black_line_and_color(frame, threshold=60):
+    """
+    Detect black line, calculate direction, and detect colors (Black, Red, Green, Blue)
+    """
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)  # แปลงภาพเป็นโทนสีเทา
+    _, mask = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY_INV)  # ทำการแปลงภาพให้เป็นขาวดำ (invert)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)  # ค้นหาคอนทัวร์ (เส้น)
+
+    deviations = []  # ตัวแปรเก็บค่าความเบี่ยงเบนของเส้นจากศูนย์กลาง
+    middle_points = []  # ตัวแปรเก็บพิกัดของจุดกลางของแต่ละส่วน
+    contour_path = None  # ตัวแปรเก็บเส้นที่มีรูปร่างที่ประมาณ
+    direction = "STOP"  # ทิศทางเริ่มต้นเป็น "STOP"
+    deviation_value = 0  # ค่าเบี่ยงเบนเริ่มต้น
+    line_color = "NO COLOR"  # สีของเส้นเริ่มต้นเป็น "NO COLOR"
+
+    if contours:  # ถ้ามีคอนทัวร์
+        largest_contour = max(contours, key=cv2.contourArea)  # หาคอนทัวร์ที่มีขนาดใหญ่ที่สุด
+        epsilon = 0.005 * cv2.arcLength(largest_contour, True)  # คำนวณค่า epsilon สำหรับการประมาณรูปคอนทัวร์
+        contour_path = cv2.approxPolyDP(largest_contour, epsilon, True)  # ประมาณรูปร่างของคอนทัวร์ให้เรียบขึ้น
+        
+        line_mask = np.zeros_like(mask)  # สร้างหน้ากากภาพขนาดเดียวกับ mask
+        cv2.drawContours(line_mask, [largest_contour], -1, 255, thickness=cv2.FILLED)  # วาดคอนทัวร์ลงในหน้ากาก
+
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)  # แปลงภาพเป็นโหมด HSV
+        color_ranges = {  # กำหนดช่วงของสีที่ต้องการตรวจจับ
+            "BLACK": [(0, 0, 0), (180, 255, 50)],
+            "RED": [(0, 120, 70), (10, 255, 255)],
+            "RED2": [(170, 120, 70), (180, 255, 255)],
+            "GREEN": [(35, 100, 100), (85, 255, 255)],
+            "BLUE": [(100, 150, 100), (140, 255, 255)],
+        }
+
+        # ตรวจจับสีที่ปรากฏในภาพ
+        for color, (lower, upper) in color_ranges.items():
+            lower, upper = adaptive_hsv_threshold(hsv, lower, upper)  # ปรับเกณฑ์ HSV ตามแสงสว่าง
+            color_mask = cv2.inRange(hsv, lower, upper)  # สร้างหน้ากากสีตามเกณฑ์
+            color_mask = cv2.bitwise_and(color_mask, color_mask, mask=line_mask)  # ใช้หน้ากากเส้นที่ตรวจพบ
+
+            if cv2.countNonZero(color_mask) > 500:  # ถ้ามีจำนวนพิกเซลสีมากกว่า 500 ให้ถือว่าเจอสี
+                line_color = f"{color} DETECTED"
+                break
+
+        # หาตำแหน่งของเส้นในแนวตั้ง
+        x, y, w, h = cv2.boundingRect(largest_contour)  # หาขนาดและตำแหน่งของกรอบที่ล้อมรอบคอนทัวร์
+        section_height = h // 4  # แบ่งกรอบออกเป็น 4 ส่วนตามความสูง
+        frame_center = frame.shape[1] // 2  # หาจุดศูนย์กลางของภาพ
+
+        top_dot = None  # ตัวแปรเก็บพิกัดของจุดบนสุด
+        for i in range(4):  # แบ่งภาพออกเป็น 4 ส่วนเพื่อหาความเบี่ยงเบน
+            section_y = int(y + (i + 0.5) * section_height)  # คำนวณตำแหน่งย่อยของแต่ละส่วน
+            middle_points.append((frame_center, section_y))  # เก็บพิกัดของจุดกลาง
+
+            section_mask = np.zeros_like(mask)  # สร้างหน้ากากสำหรับแต่ละส่วน
+            section_mask[max(0, section_y - section_height // 2):section_y + section_height // 2, :] = mask[
+                max(0, section_y - section_height // 2):section_y + section_height // 2, :]
+
+            section_contours, _ = cv2.findContours(section_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            if section_contours:  # ถ้ามีคอนทัวร์ในแต่ละส่วน
+                section_largest = max(section_contours, key=cv2.contourArea)  # หาคอนทัวร์ที่ใหญ่ที่สุดในแต่ละส่วน
+                M = cv2.moments(section_largest)  # คำนวณมุมสำหรับคอนทัวร์
+                if M["m00"] != 0:
+                    cx = int(M["m10"] / M["m00"])
+                    cy = int(M["m01"] / M["m00"])
+                    deviation = cx - frame_center  # คำนวณความเบี่ยงเบนจากศูนย์กลาง
+                    deviations.append((cx, cy, deviation))  # เก็บค่าความเบี่ยงเบน
+
+                    if i == 0:
+                        top_dot = (cx, cy)  # ถ้าส่วนแรกคือจุดบนสุดเก็บพิกัด
+
+        # คำนวณทิศทางจากความเบี่ยงเบน
+        if deviations:
+            deviation_value = deviations[-1][2]
+            if deviation_value < -20:
+                direction = "ADJUST LEFT"  # ถ้าความเบี่ยงเบนไปทางซ้าย
+            elif deviation_value > 20:
+                direction = "ADJUST RIGHT"  # ถ้าความเบี่ยงเบนไปทางขวา
+            else:
+                direction = "FORWARD"  # ถ้าไม่เบี่ยงเบนมากก็ต่อไป
+
+        # ตรวจสอบว่าต้องเลี้ยวหรือไม่
+        if top_dot:
+            deviation = top_dot[0] - frame_center
+            if deviation < -100:
+                direction = "TURN LEFT"
+            elif deviation > 100:
+                direction = "TURN RIGHT"
+            elif deviation < -20:
+                direction = "ADJUST LEFT"
+            elif deviation > 20:
+                direction = "ADJUST RIGHT"
+            else:
+                direction = "STRAIGHT"  # ถ้าความเบี่ยงเบนไม่มาก
+
+    return mask, deviations, middle_points, contour_path, direction, deviation_value, line_color
+
+# ฟังก์ชันสำหรับรับข้อมูลวิดีโอจาก Client
+def receive_video(conn):
+    data = b""  # ตัวแปรเก็บข้อมูลที่รับจาก Client
+    payload_size = struct.calcsize("Q")  # ขนาดของข้อมูลที่คาดว่าจะได้รับ
+    try:
+        while True:
+            while len(data) < payload_size:
+                packet = conn.recv(4096)
+                if not packet:
+                    print("Client disconnected.")
+                    return
+                data += packet
+
+            packed_msg_size = data[:payload_size]  # ขนาดของข้อความ
+            data = data[payload_size:]  # เอาขนาดข้อความออกจากข้อมูลที่รับ
+            msg_size = struct.unpack("Q", packed_msg_size)[0]  # แปลงขนาดของข้อความเป็นตัวเลข
+
+            while len(data) < msg_size:
+                data += conn.recv(4096)
+
+            frame_data
